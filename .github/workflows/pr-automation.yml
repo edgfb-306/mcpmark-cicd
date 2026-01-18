@@ -1,0 +1,202 @@
+name: Pull Request Automation Workflow
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install project dependencies
+        run: npm ci
+
+      - name: Run ESLint checks
+        id: eslint
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Run Prettier formatting check
+        id: prettier
+        run: npx prettier --check .
+        continue-on-error: true
+
+      - name: Post Code Quality Report to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eslintStatus = ${{ steps.eslint.outcome }};
+            const prettierStatus = ${{ steps.prettier.outcome }};
+            const commentBody = `## Code Quality Report
+            - **ESLint**: ${eslintStatus === 'success' ? '✅ All checks passed' : '❌ Issues found'}
+            - **Prettier**: ${prettierStatus === 'success' ? '✅ Code is properly formatted' : '❌ Formatting issues detected'}
+            `;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install project dependencies
+        run: npm ci
+
+      - name: Run test suite with coverage
+        id: test-suite
+        run: npm test -- --coverage
+        continue-on-error: true
+
+      - name: Post Test Coverage Report to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const testStatus = ${{ steps.test-suite.outcome }};
+            let coveragePercent = 'N/A';
+            try {
+              const fs = require('fs');
+              const coverageData = JSON.parse(fs.readFileSync('coverage/coverage-summary.json', 'utf8'));
+              coveragePercent = coverageData.total.lines.pct + '%';
+            } catch (error) {
+              coveragePercent = 'Could not generate coverage report';
+            }
+            const commentBody = `## Test Coverage Report
+            - **Test Suite**: ${testStatus === 'success' ? '✅ All tests passed' : '❌ Test failures detected'}
+            - **Line Coverage**: ${coveragePercent}
+            `;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
+
+      - name: Upload test coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-coverage-report
+          path: coverage/
+          retention-days: 7
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install project dependencies
+        run: npm ci
+
+      - name: Run dependency vulnerability check
+        id: dependency-scan
+        run: npm audit --audit-level=moderate
+        continue-on-error: true
+
+      - name: Scan for secrets in code changes
+        id: secret-scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Post Security Scan Report to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const dependencyStatus = ${{ steps.dependency-scan.outcome }};
+            const secretStatus = ${{ steps.secret-scan.outcome }};
+            const commentBody = `## Security Scan Report
+            - **Dependency Vulnerabilities**: ${dependencyStatus === 'success' ? '✅ No moderate/high vulnerabilities' : '❌ Vulnerabilities found in dependencies'}
+            - **Secret Scan**: ${secretStatus === 'success' ? '✅ No secrets detected in code' : '❌ Secrets found in code changes'}
+            `;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
+
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install project dependencies
+        run: npm ci
+
+      - name: Build application
+        id: build-app
+        run: npm run build
+        continue-on-error: true
+
+      - name: Validate application endpoints
+        id: validate-endpoints
+        run: |
+          # Start the application in background
+          npm start &
+          # Wait for app to initialize
+          sleep 5
+          # Test health endpoint (adjust path if needed)
+          curl -f http://localhost:3000/health || exit 1
+        continue-on-error: true
+
+      - name: Post Build Validation Report to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const buildStatus = ${{ steps.build-app.outcome }};
+            const endpointStatus = ${{ steps.validate-endpoints.outcome }};
+            const commentBody = `## Build Validation
+            - **Build Status**: ${buildStatus === 'success' ? '✅ Application built successfully' : '❌ Build failed'}
+            - **Endpoint Validation**: ${endpointStatus === 'success' ? '✅ All endpoints are accessible' : '❌ Endpoints are unreachable'}
+            `;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
+
+      - name: Upload deployment preview artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-preview
+          path: build/
+          retention-days: 7
